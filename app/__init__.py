@@ -1,0 +1,2 @@
+"""DriveOS Workshop Analytics Service."""
+__version__ = "0.1.0"
