@@ -99,6 +99,23 @@ TABLE_DEFINITIONS: List[str] = [
     ) ENGINE = ReplacingMergeTree(created_at)
     PARTITION BY (tenant_id, toYYYYMM(event_date))
     ORDER BY (tenant_id, event_date, event_id);
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS analytics_branch_daily_snapshots (
+        snapshot_id UUID,
+        tenant_id UUID,
+        branch_id UUID,
+        snapshot_date Date,
+        total_revenue Decimal(12, 2),
+        completed_work_orders_count UInt32,
+        total_appointments_count UInt32,
+        low_stock_alerts_count UInt32,
+        dtc_alerts_count UInt32,
+        event_date Date DEFAULT snapshot_date,
+        updated_at DateTime DEFAULT now()
+    ) ENGINE = ReplacingMergeTree(updated_at)
+    PARTITION BY (tenant_id, toYYYYMM(event_date))
+    ORDER BY (tenant_id, branch_id, snapshot_date);
     """
 ]
 

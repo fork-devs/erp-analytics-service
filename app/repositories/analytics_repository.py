@@ -1,6 +1,6 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 import logging
 
 from clickhouse_connect.driver.client import Client
@@ -131,6 +131,32 @@ class AnalyticsRepository:
             for r in records
         ]
         self.client.insert("analytics_telemetry_alerts", data, column_names=columns)
+
+    def insert_branch_snapshots(self, records: List[Dict[str, Any]]) -> None:
+        if not records:
+            return
+        columns = [
+            "snapshot_id", "tenant_id", "branch_id", "snapshot_date",
+            "total_revenue", "completed_work_orders_count", "total_appointments_count",
+            "low_stock_alerts_count", "dtc_alerts_count", "event_date", "updated_at"
+        ]
+        data = [
+            [
+                str(r.get("snapshot_id", uuid4())),
+                str(r["tenant_id"]),
+                str(r["branch_id"]),
+                r["snapshot_date"],
+                max(0.0, float(r.get("total_revenue", 0.0))),
+                max(0, int(r.get("completed_work_orders_count", 0))),
+                max(0, int(r.get("total_appointments_count", 0))),
+                max(0, int(r.get("low_stock_alerts_count", 0))),
+                max(0, int(r.get("dtc_alerts_count", 0))),
+                r.get("event_date") or r["snapshot_date"],
+                r.get("updated_at") or datetime.now(timezone.utc),
+            ]
+            for r in records
+        ]
+        self.client.insert("analytics_branch_daily_snapshots", data, column_names=columns)
 
     # -------------------------------------------------------------
     # Query Methods (Multi-Tenant Isolated)
@@ -319,3 +345,207 @@ class AnalyticsRepository:
             "fleet_health_score": float(fleet_health_score),
             "top_dtc_codes": top_dtcs,
         }
+
+    # -------------------------------------------------------------
+    # Branch Daily Snapshots & Network Consolidated Queries
+    # -------------------------------------------------------------
+    def get_branch_daily_snapshot(
+        self, tenant_id: UUID, branch_id: UUID, snapshot_date: date
+    ) -> Optional[Dict[str, Any]]:
+        tid = self._validate_tenant(tenant_id)
+        bid = str(branch_id)
+        query = """
+            SELECT
+                snapshot_id,
+                tenant_id,
+                branch_id,
+                snapshot_date,
+                total_revenue,
+                completed_work_orders_count,
+                total_appointments_count,
+                low_stock_alerts_count,
+                dtc_alerts_count
+            FROM analytics_branch_daily_snapshots FINAL
+            WHERE tenant_id = %(tenant_id)s
+              AND branch_id = %(branch_id)s
+              AND snapshot_date = %(snapshot_date)s
+            LIMIT 1
+        """
+        result = self.client.query(
+            query,
+            parameters={
+                "tenant_id": tid,
+                "branch_id": bid,
+                "snapshot_date": str(snapshot_date),
+            },
+        )
+        if not result.result_rows:
+            return None
+        row = result.result_rows[0]
+        return {
+            "snapshot_id": UUID(str(row[0])),
+            "tenant_id": UUID(str(row[1])),
+            "branch_id": UUID(str(row[2])),
+            "snapshot_date": row[3],
+            "total_revenue": max(0.0, float(row[4])),
+            "completed_work_orders_count": max(0, int(row[5])),
+            "total_appointments_count": max(0, int(row[6])),
+            "low_stock_alerts_count": max(0, int(row[7])),
+            "dtc_alerts_count": max(0, int(row[8])),
+        }
+
+    def get_branch_daily_summary(
+        self, tenant_id: UUID, branch_id: UUID, business_date: date
+    ) -> Dict[str, Any]:
+        snapshot = self.get_branch_daily_snapshot(tenant_id, branch_id, business_date)
+        if snapshot:
+            return {
+                "branch_id": snapshot["branch_id"],
+                "total_revenue": snapshot["total_revenue"],
+                "completed_work_orders_count": snapshot["completed_work_orders_count"],
+                "total_appointments_count": snapshot["total_appointments_count"],
+                "low_stock_alerts_count": snapshot["low_stock_alerts_count"],
+                "dtc_alerts_count": snapshot["dtc_alerts_count"],
+            }
+        return {
+            "branch_id": branch_id,
+            "total_revenue": 0.0,
+            "completed_work_orders_count": 0,
+            "total_appointments_count": 0,
+            "low_stock_alerts_count": 0,
+            "dtc_alerts_count": 0,
+        }
+
+    def get_branch_financial_range(
+        self,
+        tenant_id: UUID,
+        branch_id: UUID,
+        start_date: date,
+        end_date: date,
+    ) -> List[Dict[str, Any]]:
+        tid = self._validate_tenant(tenant_id)
+        bid = str(branch_id)
+        query = """
+            SELECT
+                snapshot_id,
+                branch_id,
+                snapshot_date,
+                total_revenue,
+                completed_work_orders_count,
+                total_appointments_count,
+                low_stock_alerts_count,
+                dtc_alerts_count
+            FROM analytics_branch_daily_snapshots FINAL
+            WHERE tenant_id = %(tenant_id)s
+              AND branch_id = %(branch_id)s
+              AND snapshot_date >= %(start_date)s
+              AND snapshot_date <= %(end_date)s
+            ORDER BY snapshot_date ASC
+        """
+        result = self.client.query(
+            query,
+            parameters={
+                "tenant_id": tid,
+                "branch_id": bid,
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+            },
+        )
+        snapshots = []
+        for row in result.result_rows:
+            snapshots.append({
+                "id": UUID(str(row[0])),
+                "branch_id": UUID(str(row[1])),
+                "snapshot_date": row[2],
+                "total_revenue": max(0.0, float(row[3])),
+                "completed_work_orders_count": max(0, int(row[4])),
+                "total_appointments_count": max(0, int(row[5])),
+                "low_stock_alerts_count": max(0, int(row[6])),
+                "dtc_alerts_count": max(0, int(row[7])),
+            })
+        return snapshots
+
+    def get_network_summary(
+        self, tenant_id: UUID, business_date: date
+    ) -> Dict[str, Any]:
+        tid = self._validate_tenant(tenant_id)
+        query = """
+            SELECT
+                uniqExact(branch_id) AS total_active_branches,
+                coalesce(sum(total_revenue), 0.0) AS total_network_revenue,
+                coalesce(sum(completed_work_orders_count), 0) AS total_network_completed_work_orders,
+                coalesce(sum(total_appointments_count), 0) AS total_network_appointments,
+                coalesce(sum(dtc_alerts_count), 0) AS total_network_dtc_alerts
+            FROM analytics_branch_daily_snapshots FINAL
+            WHERE tenant_id = %(tenant_id)s
+              AND snapshot_date = %(business_date)s
+        """
+        result = self.client.query(
+            query,
+            parameters={
+                "tenant_id": tid,
+                "business_date": str(business_date),
+            },
+        )
+        if not result.result_rows:
+            return {
+                "total_active_branches_count": 0,
+                "total_network_revenue": 0.0,
+                "total_network_completed_work_orders": 0,
+                "total_network_appointments": 0,
+                "total_network_dtc_alerts": 0,
+            }
+        row = result.result_rows[0]
+        return {
+            "total_active_branches_count": int(row[0]),
+            "total_network_revenue": max(0.0, float(row[1])),
+            "total_network_completed_work_orders": max(0, int(row[2])),
+            "total_network_appointments": max(0, int(row[3])),
+            "total_network_dtc_alerts": max(0, int(row[4])),
+        }
+
+    def apply_delta_to_snapshot(
+        self,
+        tenant_id: UUID,
+        branch_id: UUID,
+        snapshot_date: date,
+        revenue_delta: float = 0.0,
+        completed_wo_delta: int = 0,
+        appointments_delta: int = 0,
+        dtc_alerts_delta: int = 0,
+        low_stock_alerts_count: Optional[int] = None,
+    ) -> None:
+        """Applies deltas to the daily snapshot for the given branch and date, with clamping >= 0."""
+        existing = self.get_branch_daily_snapshot(tenant_id, branch_id, snapshot_date)
+        if existing:
+            new_rev = max(0.0, existing["total_revenue"] + revenue_delta)
+            new_wo = max(0, existing["completed_work_orders_count"] + completed_wo_delta)
+            new_app = max(0, existing["total_appointments_count"] + appointments_delta)
+            new_dtc = max(0, existing["dtc_alerts_count"] + dtc_alerts_delta)
+            new_stock = (
+                low_stock_alerts_count
+                if low_stock_alerts_count is not None
+                else existing["low_stock_alerts_count"]
+            )
+            snapshot_id = existing["snapshot_id"]
+        else:
+            new_rev = max(0.0, revenue_delta)
+            new_wo = max(0, completed_wo_delta)
+            new_app = max(0, appointments_delta)
+            new_dtc = max(0, dtc_alerts_delta)
+            new_stock = max(0, low_stock_alerts_count or 0)
+            snapshot_id = uuid4()
+
+        self.insert_branch_snapshots([{
+            "snapshot_id": snapshot_id,
+            "tenant_id": tenant_id,
+            "branch_id": branch_id,
+            "snapshot_date": snapshot_date,
+            "total_revenue": new_rev,
+            "completed_work_orders_count": new_wo,
+            "total_appointments_count": new_app,
+            "low_stock_alerts_count": new_stock,
+            "dtc_alerts_count": new_dtc,
+            "updated_at": datetime.now(timezone.utc),
+        }])
+

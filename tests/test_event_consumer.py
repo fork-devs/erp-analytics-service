@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 import pytest
@@ -179,3 +179,113 @@ async def test_kafka_worker_disabled(mock_repo):
     await worker.start()
     assert worker._running is False
     mock_aiokafka.start.assert_not_awaited()
+
+
+def test_process_branch_snapshot_events(mock_repo):
+    consumer = AnalyticsEventConsumer(repository=mock_repo)
+    tenant_id = uuid4()
+    branch_id = uuid4()
+    b_date = date(2026, 10, 31)
+
+    # 1. WorkOrderCompleted
+    wo_payload = {
+        "event_id": str(uuid4()),
+        "event_type": "WorkOrderCompleted",
+        "tenant_id": str(tenant_id),
+        "occurred_at": "2026-10-31T10:00:00Z",
+        "payload": {
+            "work_order_id": str(uuid4()),
+            "branch_id": str(branch_id),
+            "total_amount": 350.0,
+            "is_completed": True,
+        },
+    }
+    assert consumer.process_event_payload("workshop.work-orders", wo_payload) is True
+    mock_repo.apply_delta_to_snapshot.assert_called_with(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        snapshot_date=b_date,
+        revenue_delta=350.0,
+        completed_wo_delta=1,
+    )
+
+    # 2. WorkOrderReopened
+    reopen_payload = {
+        "event_id": str(uuid4()),
+        "event_type": "WorkOrderReopened",
+        "tenant_id": str(tenant_id),
+        "occurred_at": "2026-10-31T11:00:00Z",
+        "payload": {
+            "work_order_id": str(uuid4()),
+            "branch_id": str(branch_id),
+            "total_amount": 350.0,
+        },
+    }
+    assert consumer.process_event_payload("workshop.work-orders", reopen_payload) is True
+    mock_repo.apply_delta_to_snapshot.assert_called_with(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        snapshot_date=b_date,
+        revenue_delta=-350.0,
+        completed_wo_delta=-1,
+    )
+
+    # 3. AppointmentCreated
+    app_payload = {
+        "event_id": str(uuid4()),
+        "event_type": "AppointmentCreated",
+        "tenant_id": str(tenant_id),
+        "occurred_at": "2026-10-31T12:00:00Z",
+        "payload": {
+            "appointment_id": str(uuid4()),
+            "branch_id": str(branch_id),
+        },
+    }
+    assert consumer.process_event_payload("fleet.appointments", app_payload) is True
+    mock_repo.apply_delta_to_snapshot.assert_called_with(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        snapshot_date=b_date,
+        appointments_delta=1,
+    )
+
+    # 4. DtcAlertTriggered
+    dtc_payload = {
+        "event_id": str(uuid4()),
+        "event_type": "DtcAlertTriggered",
+        "tenant_id": str(tenant_id),
+        "occurred_at": "2026-10-31T13:00:00Z",
+        "payload": {
+            "vehicle_id": str(uuid4()),
+            "branch_id": str(branch_id),
+            "dtc_code": "P0300",
+            "severity": "CRITICAL",
+        },
+    }
+    assert consumer.process_event_payload("iot.alerts", dtc_payload) is True
+    mock_repo.apply_delta_to_snapshot.assert_called_with(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        snapshot_date=b_date,
+        dtc_alerts_delta=1,
+    )
+
+    # 5. LowStockAlertTriggered
+    stock_payload = {
+        "event_id": str(uuid4()),
+        "event_type": "LowStockAlertTriggered",
+        "tenant_id": str(tenant_id),
+        "occurred_at": "2026-10-31T14:00:00Z",
+        "payload": {
+            "branch_id": str(branch_id),
+            "low_stock_alerts_count": 3,
+        },
+    }
+    assert consumer.process_event_payload("inventory.alerts", stock_payload) is True
+    mock_repo.apply_delta_to_snapshot.assert_called_with(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        snapshot_date=b_date,
+        low_stock_alerts_count=3,
+    )
+

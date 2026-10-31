@@ -31,7 +31,11 @@ class Settings(BaseSettings):
     KAFKA_TOPIC_WORK_ORDERS: str = "workshop.work-orders"
     KAFKA_TOPIC_STOCK_MOVEMENTS: str = "inventory.movements"
     KAFKA_TOPIC_IOT_ALERTS: str = "iot.alerts"
+    KAFKA_TOPIC_APPOINTMENTS: str = "fleet.appointments"
     KAFKA_CONSUMER_ENABLED: bool = True
+
+    # Business timezone
+    ANALYTICS_ZONE_ID: str = "America/Lima"
 
     # CORS
     CORS_ORIGINS: List[str] = ["*"]
@@ -51,6 +55,7 @@ class Settings(BaseSettings):
             self.KAFKA_TOPIC_WORK_ORDERS,
             self.KAFKA_TOPIC_STOCK_MOVEMENTS,
             self.KAFKA_TOPIC_IOT_ALERTS,
+            self.KAFKA_TOPIC_APPOINTMENTS,
         ]
 
 

@@ -1,9 +1,10 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
+import zoneinfo
 
 from aiokafka import AIOKafkaConsumer
 
@@ -25,6 +26,17 @@ def parse_datetime(val: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_business_date(dt: datetime, tz_name: str = "America/Lima") -> date:
+    """Converts a UTC or naive datetime into calendar business date in business timezone."""
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).date()
+
+
 class AnalyticsEventConsumer:
     """Processes incoming domain events and routes them to ClickHouse analytics tables."""
 
@@ -39,16 +51,22 @@ class AnalyticsEventConsumer:
             occurred_at = parse_datetime(data.get("occurred_at") or data.get("timestamp"))
 
             payload = data.get("payload", data)
+            event_type = data.get("event_type") or data.get("type")
 
             if "invoices" in topic:
                 self._handle_invoice(event_id, tenant_id, payload, occurred_at)
             elif "payments" in topic:
                 self._handle_payment(event_id, tenant_id, payload, occurred_at)
             elif "work-orders" in topic:
-                self._handle_work_order(event_id, tenant_id, payload, occurred_at)
-            elif "movements" in topic:
-                self._handle_stock_movement(event_id, tenant_id, payload, occurred_at)
-            elif "alerts" in topic:
+                self._handle_work_order(event_id, tenant_id, payload, occurred_at, event_type)
+            elif "appointments" in topic or event_type == "AppointmentCreated":
+                self._handle_appointment(event_id, tenant_id, payload, occurred_at)
+            elif "movements" in topic or "inventory" in topic or event_type == "LowStockAlertTriggered":
+                if event_type == "LowStockAlertTriggered" or "alert" in topic:
+                    self._handle_inventory_alert(event_id, tenant_id, payload, occurred_at)
+                else:
+                    self._handle_stock_movement(event_id, tenant_id, payload, occurred_at)
+            elif "alerts" in topic or event_type == "DtcAlertTriggered":
                 self._handle_telemetry_alert(event_id, tenant_id, payload, occurred_at)
             else:
                 logger.debug(f"Unhandled topic in analytics consumer: {topic}")
@@ -94,7 +112,14 @@ class AnalyticsEventConsumer:
         }
         self._repo.insert_payments([record])
 
-    def _handle_work_order(self, event_id: UUID, tenant_id: UUID, p: Dict[str, Any], dt: datetime) -> None:
+    def _handle_work_order(
+        self,
+        event_id: UUID,
+        tenant_id: UUID,
+        p: Dict[str, Any],
+        dt: datetime,
+        event_type: Optional[str] = None,
+    ) -> None:
         completed_at = parse_datetime(p["completed_at"]) if p.get("completed_at") else (dt if p.get("is_completed") else None)
         record = {
             "event_id": event_id,
@@ -113,6 +138,72 @@ class AnalyticsEventConsumer:
             "event_date": (completed_at.date() if completed_at else dt.date()),
         }
         self._repo.insert_work_orders([record])
+
+        # Apply snapshot delta if branch_id is present
+        branch_id_val = p.get("branch_id") or p.get("branchId")
+        if branch_id_val:
+            try:
+                bid = UUID(str(branch_id_val))
+                b_date = get_business_date(dt)
+                evt_type = event_type or p.get("event_type") or p.get("status")
+                tot = float(
+                    p.get("total_amount")
+                    or p.get("totalAmount")
+                    or (float(p.get("labor_cost", 0.0)) + float(p.get("parts_cost", 0.0)))
+                )
+                if evt_type == "WorkOrderReopened":
+                    self._repo.apply_delta_to_snapshot(
+                        tenant_id=tenant_id,
+                        branch_id=bid,
+                        snapshot_date=b_date,
+                        revenue_delta=-tot,
+                        completed_wo_delta=-1,
+                    )
+                else:
+                    self._repo.apply_delta_to_snapshot(
+                        tenant_id=tenant_id,
+                        branch_id=bid,
+                        snapshot_date=b_date,
+                        revenue_delta=tot,
+                        completed_wo_delta=1,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to update branch snapshot from work order event: {e}")
+
+    def _handle_appointment(
+        self, event_id: UUID, tenant_id: UUID, p: Dict[str, Any], dt: datetime
+    ) -> None:
+        branch_id_val = p.get("branch_id") or p.get("branchId")
+        if branch_id_val:
+            try:
+                bid = UUID(str(branch_id_val))
+                b_date = get_business_date(dt)
+                self._repo.apply_delta_to_snapshot(
+                    tenant_id=tenant_id,
+                    branch_id=bid,
+                    snapshot_date=b_date,
+                    appointments_delta=1,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update branch snapshot from appointment: {e}")
+
+    def _handle_inventory_alert(
+        self, event_id: UUID, tenant_id: UUID, p: Dict[str, Any], dt: datetime
+    ) -> None:
+        branch_id_val = p.get("branch_id") or p.get("branchId")
+        if branch_id_val:
+            try:
+                bid = UUID(str(branch_id_val))
+                b_date = get_business_date(dt)
+                count = int(p.get("low_stock_alerts_count") or p.get("lowStockAlertsCount") or 1)
+                self._repo.apply_delta_to_snapshot(
+                    tenant_id=tenant_id,
+                    branch_id=bid,
+                    snapshot_date=b_date,
+                    low_stock_alerts_count=count,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update branch snapshot from inventory alert: {e}")
 
     def _handle_stock_movement(self, event_id: UUID, tenant_id: UUID, p: Dict[str, Any], dt: datetime) -> None:
         moved_at = parse_datetime(p.get("moved_at") or dt)
@@ -148,6 +239,20 @@ class AnalyticsEventConsumer:
             "event_date": alert_timestamp.date(),
         }
         self._repo.insert_telemetry_alerts([record])
+
+        branch_id_val = p.get("branch_id") or p.get("branchId")
+        if branch_id_val:
+            try:
+                bid = UUID(str(branch_id_val))
+                b_date = get_business_date(alert_timestamp)
+                self._repo.apply_delta_to_snapshot(
+                    tenant_id=tenant_id,
+                    branch_id=bid,
+                    snapshot_date=b_date,
+                    dtc_alerts_delta=1,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update branch snapshot from telemetry alert: {e}")
 
 
 class KafkaConsumerWorker:
