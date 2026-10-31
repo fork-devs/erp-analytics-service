@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+from fastapi import FastAPI
 from starlette.testclient import TestClient
 from app.core.lifespan import lifespan
 from app.main import app
@@ -15,12 +16,11 @@ async def test_lifespan_context_manager():
         mock_worker.stop = AsyncMock()
         mock_worker_cls.return_value = mock_worker
 
-        dummy_app = MagicMock()
-        dummy_app.state = MagicMock()
+        test_app = FastAPI()
 
-        async with lifespan(dummy_app):
+        async with lifespan(test_app):
             mock_worker.start.assert_awaited_once()
-            assert dummy_app.state.kafka_worker == mock_worker
+            assert test_app.state.kafka_worker == mock_worker
 
         mock_worker.stop.assert_awaited_once()
         mock_ch.close.assert_called_once()

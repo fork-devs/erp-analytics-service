@@ -17,32 +17,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info(f"Starting {settings.SERVICE_NAME} on port {settings.PORT} ({settings.ENVIRONMENT})...")
 
-    # 1. Initialize ClickHouse schema if available
+    # 1. Use existing manager if injected in tests, otherwise global clickhouse_manager
+    ch_manager = getattr(app.state, "clickhouse_manager", None) or clickhouse_manager
+    app.state.clickhouse_manager = ch_manager
+
     try:
-        clickhouse_manager.init_schema()
+        ch_manager.init_schema()
         logger.info("ClickHouse schema verified/initialized successfully.")
     except Exception as e:
         logger.warning(f"ClickHouse schema initialization deferred (connection pending): {e}")
 
-    # 2. Initialize repositories, consumer handler, and Kafka worker
-    analytics_repo = AnalyticsRepository(manager=clickhouse_manager)
-    event_consumer = AnalyticsEventConsumer(repository=analytics_repo)
-    kafka_worker = KafkaConsumerWorker(
+    # 2. Use existing repo if injected in tests
+    analytics_repo = getattr(app.state, "analytics_repo", None) or AnalyticsRepository(manager=ch_manager)
+    app.state.analytics_repo = analytics_repo
+
+    event_consumer = getattr(app.state, "event_consumer", None) or AnalyticsEventConsumer(repository=analytics_repo)
+    app.state.event_consumer = event_consumer
+
+    kafka_worker = getattr(app.state, "kafka_worker", None) or KafkaConsumerWorker(
         event_consumer=event_consumer,
         settings=settings,
     )
+    app.state.kafka_worker = kafka_worker
 
     # 3. Start background Kafka consumer
     try:
         await kafka_worker.start()
     except Exception as e:
         logger.warning(f"Kafka consumer start deferred (broker unreachable): {e}")
-
-    # Store objects on application state for dependency injection
-    app.state.clickhouse_manager = clickhouse_manager
-    app.state.analytics_repo = analytics_repo
-    app.state.event_consumer = event_consumer
-    app.state.kafka_worker = kafka_worker
 
     yield
 
@@ -54,7 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Error stopping Kafka worker during shutdown: {e}")
 
     try:
-        clickhouse_manager.close()
+        ch_manager.close()
         logger.info("ClickHouse client disconnected.")
     except Exception as e:
         logger.error(f"Error closing ClickHouse client: {e}")

@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.error_handlers import register_error_handlers
+from app.api.v1.endpoints.analytics import router as analytics_router
+from app.api.v1.endpoints.health import router as health_router
 from app.core.config import get_settings
 from app.core.lifespan import lifespan
 from app.core.logging import setup_logging
@@ -25,6 +28,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Error handlers (RFC 9457)
+register_error_handlers(app)
+
+# Include Routers
+app.include_router(health_router)
+app.include_router(analytics_router)
 
 
 @app.get("/", include_in_schema=False)
