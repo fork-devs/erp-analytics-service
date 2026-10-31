@@ -3,5 +3,15 @@ name = "erp-analytics-service"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi[standard]>=0.162.0",
+    "aiokafka>=0.11.0",
+    "clickhouse-connect>=0.7.0",
+    "fastapi[standard]>=0.115.0",
+    "pydantic-settings>=2.5.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
 ]
