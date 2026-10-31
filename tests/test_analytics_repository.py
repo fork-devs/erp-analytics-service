@@ -132,3 +132,110 @@ def test_get_fleet_health_overview(mock_clickhouse_manager):
     # penalty = (2 * 15 + 4 * 5) / 10 = (30 + 20) / 10 = 5.0 -> score = 95.0
     assert fleet["fleet_health_score"] == 95.0
     assert len(fleet["top_dtc_codes"]) == 2
+
+
+def test_branch_daily_snapshot_methods(mock_clickhouse_manager):
+    manager, client = mock_clickhouse_manager
+    repo = AnalyticsRepository(manager=manager)
+
+    tenant_id = uuid4()
+    branch_id = uuid4()
+    today = date(2026, 10, 31)
+
+    # 1. Test insert_branch_snapshots
+    repo.insert_branch_snapshots(
+        [
+            {
+                "snapshot_id": uuid4(),
+                "tenant_id": tenant_id,
+                "branch_id": branch_id,
+                "snapshot_date": today,
+                "total_revenue": 1250.0,
+                "completed_work_orders_count": 4,
+                "total_appointments_count": 7,
+                "low_stock_alerts_count": 2,
+                "dtc_alerts_count": 1,
+            }
+        ]
+    )
+    client.insert.assert_called_once()
+    assert client.insert.call_args[0][0] == "analytics_branch_daily_snapshots"
+
+    # 2. Test get_branch_daily_summary with existing data
+    query_result = MagicMock()
+    query_result.result_rows = [
+        [
+            str(uuid4()),
+            str(tenant_id),
+            str(branch_id),
+            today,
+            1250.0,
+            4,
+            7,
+            2,
+            1,
+        ]
+    ]
+    client.query.return_value = query_result
+
+    summary = repo.get_branch_daily_summary(tenant_id, branch_id, today)
+    assert summary["branch_id"] == branch_id
+    assert summary["total_revenue"] == 1250.0
+    assert summary["completed_work_orders_count"] == 4
+    assert summary["total_appointments_count"] == 7
+    assert summary["low_stock_alerts_count"] == 2
+    assert summary["dtc_alerts_count"] == 1
+
+    # 3. Test get_branch_financial_range
+    query_result_range = MagicMock()
+    query_result_range.result_rows = [
+        [str(uuid4()), str(branch_id), date(2026, 10, 30), 950.0, 3, 5, 2, 0],
+        [str(uuid4()), str(branch_id), date(2026, 10, 31), 1250.0, 4, 7, 2, 1],
+    ]
+    client.query.return_value = query_result_range
+    fin_history = repo.get_branch_financial_range(tenant_id, branch_id, date(2026, 10, 1), today)
+    assert len(fin_history) == 2
+    assert fin_history[0]["total_revenue"] == 950.0
+    assert fin_history[1]["total_revenue"] == 1250.0
+
+    # 4. Test get_network_summary
+    network_result = MagicMock()
+    network_result.result_rows = [[3, 4850.0, 14, 22, 3]]
+    client.query.return_value = network_result
+    net_summary = repo.get_network_summary(tenant_id, today)
+    assert net_summary["total_active_branches_count"] == 3
+    assert net_summary["total_network_revenue"] == 4850.0
+    assert net_summary["total_network_completed_work_orders"] == 14
+    assert net_summary["total_network_appointments"] == 22
+    assert net_summary["total_network_dtc_alerts"] == 3
+
+
+def test_apply_delta_to_snapshot(mock_clickhouse_manager):
+    manager, client = mock_clickhouse_manager
+    repo = AnalyticsRepository(manager=manager)
+
+    tenant_id = uuid4()
+    branch_id = uuid4()
+    today = date(2026, 10, 31)
+
+    # Empty existing snapshot -> initializes from delta
+    empty_result = MagicMock()
+    empty_result.result_rows = []
+    client.query.return_value = empty_result
+
+    repo.apply_delta_to_snapshot(
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        snapshot_date=today,
+        revenue_delta=350.0,
+        completed_wo_delta=1,
+        appointments_delta=2,
+        dtc_alerts_delta=1,
+    )
+    client.insert.assert_called()
+    inserted_rows = client.insert.call_args[0][1]
+    assert inserted_rows[0][4] == 350.0  # total_revenue
+    assert inserted_rows[0][5] == 1  # completed_work_orders_count
+    assert inserted_rows[0][6] == 2  # total_appointments_count
+    assert inserted_rows[0][8] == 1  # dtc_alerts_count
+

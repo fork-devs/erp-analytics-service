@@ -1,9 +1,12 @@
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+import zoneinfo
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.repositories.analytics_repository import AnalyticsRepository
+
+LIMA_TZ = zoneinfo.ZoneInfo("America/Lima")
 
 
 # -------------------------------------------------------------
@@ -57,6 +60,40 @@ class FleetHealthResponse(BaseModel):
     warning_alerts: int
     fleet_health_score: float = Field(..., ge=0.0, le=100.0)
     top_dtc_codes: List[DtcCodeSummary]
+
+
+class BranchDailySummaryResponse(BaseModel):
+    branch_id: UUID = Field(..., serialization_alias="branchId")
+    total_revenue: float = Field(default=0.0, ge=0.0, serialization_alias="totalRevenue")
+    completed_work_orders_count: int = Field(default=0, ge=0, serialization_alias="completedWorkOrdersCount")
+    total_appointments_count: int = Field(default=0, ge=0, serialization_alias="totalAppointmentsCount")
+    low_stock_alerts_count: int = Field(default=0, ge=0, serialization_alias="lowStockAlertsCount")
+    dtc_alerts_count: int = Field(default=0, ge=0, serialization_alias="dtcAlertsCount")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BranchFinancialSnapshotItem(BaseModel):
+    id: UUID
+    branch_id: UUID = Field(..., serialization_alias="branchId")
+    snapshot_date: date = Field(..., serialization_alias="snapshotDate")
+    total_revenue: float = Field(default=0.0, ge=0.0, serialization_alias="totalRevenue")
+    completed_work_orders_count: int = Field(default=0, ge=0, serialization_alias="completedWorkOrdersCount")
+    total_appointments_count: int = Field(default=0, ge=0, serialization_alias="totalAppointmentsCount")
+    low_stock_alerts_count: int = Field(default=0, ge=0, serialization_alias="lowStockAlertsCount")
+    dtc_alerts_count: int = Field(default=0, ge=0, serialization_alias="dtcAlertsCount")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class NetworkSummaryResponse(BaseModel):
+    total_active_branches_count: int = Field(default=0, ge=0, serialization_alias="totalActiveBranchesCount")
+    total_network_revenue: float = Field(default=0.0, ge=0.0, serialization_alias="totalNetworkRevenue")
+    total_network_completed_work_orders: int = Field(default=0, ge=0, serialization_alias="totalNetworkCompletedWorkOrders")
+    total_network_appointments: int = Field(default=0, ge=0, serialization_alias="totalNetworkAppointments")
+    total_network_dtc_alerts: int = Field(default=0, ge=0, serialization_alias="totalNetworkDtcAlerts")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 # -------------------------------------------------------------
@@ -123,3 +160,52 @@ class AnalyticsService:
             fleet_health_score=data["fleet_health_score"],
             top_dtc_codes=[DtcCodeSummary(**dtc) for dtc in data["top_dtc_codes"]],
         )
+
+    def get_branch_summary(self, tenant_id: UUID, branch_id: UUID) -> BranchDailySummaryResponse:
+        business_date = datetime.now(LIMA_TZ).date()
+        data = self._repo.get_branch_daily_summary(tenant_id, branch_id, business_date)
+        return BranchDailySummaryResponse(
+            branch_id=data["branch_id"],
+            total_revenue=data["total_revenue"],
+            completed_work_orders_count=data["completed_work_orders_count"],
+            total_appointments_count=data["total_appointments_count"],
+            low_stock_alerts_count=data["low_stock_alerts_count"],
+            dtc_alerts_count=data["dtc_alerts_count"],
+        )
+
+    def get_branch_financial(
+        self,
+        tenant_id: UUID,
+        branch_id: UUID,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> List[BranchFinancialSnapshotItem]:
+        today = datetime.now(LIMA_TZ).date()
+        effective_end = end_date or today
+        effective_start = start_date or (effective_end - timedelta(days=30))
+
+        if effective_start > effective_end:
+            raise ValueError(f"startDate ({effective_start}) cannot be after endDate ({effective_end})")
+
+        if (effective_end - effective_start).days > 365:
+            raise ValueError("Date range cannot exceed 365 days")
+
+        snapshots = self._repo.get_branch_financial_range(
+            tenant_id=tenant_id,
+            branch_id=branch_id,
+            start_date=effective_start,
+            end_date=effective_end,
+        )
+        return [BranchFinancialSnapshotItem(**s) for s in snapshots]
+
+    def get_network_summary(self, tenant_id: UUID) -> NetworkSummaryResponse:
+        business_date = datetime.now(LIMA_TZ).date()
+        data = self._repo.get_network_summary(tenant_id, business_date)
+        return NetworkSummaryResponse(
+            total_active_branches_count=data["total_active_branches_count"],
+            total_network_revenue=data["total_network_revenue"],
+            total_network_completed_work_orders=data["total_network_completed_work_orders"],
+            total_network_appointments=data["total_network_appointments"],
+            total_network_dtc_alerts=data["total_network_dtc_alerts"],
+        )
+

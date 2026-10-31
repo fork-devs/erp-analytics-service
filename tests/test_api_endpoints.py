@@ -162,3 +162,98 @@ def test_invalid_tenant_id_header(test_client):
     )
     assert response.status_code == 400
     assert "Invalid X-Tenant-ID header" in response.json()["detail"]
+
+
+def test_get_branch_daily_summary_endpoint(test_client):
+    client, mock_repo, _ = test_client
+    tenant_id = uuid4()
+    branch_id = uuid4()
+    mock_repo.get_branch_daily_summary.return_value = {
+        "branch_id": branch_id,
+        "total_revenue": 1250.0,
+        "completed_work_orders_count": 4,
+        "total_appointments_count": 7,
+        "low_stock_alerts_count": 2,
+        "dtc_alerts_count": 1,
+    }
+
+    response = client.get(
+        f"/api/v1/analytics/branches/{branch_id}/summary",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["branchId"] == str(branch_id)
+    assert data["totalRevenue"] == 1250.0
+    assert data["completedWorkOrdersCount"] == 4
+    assert data["totalAppointmentsCount"] == 7
+    assert data["lowStockAlertsCount"] == 2
+    assert data["dtcAlertsCount"] == 1
+
+
+def test_get_branch_financial_endpoint_success(test_client):
+    client, mock_repo, _ = test_client
+    tenant_id = uuid4()
+    branch_id = uuid4()
+    mock_repo.get_branch_financial_range.return_value = [
+        {
+            "id": uuid4(),
+            "branch_id": branch_id,
+            "snapshot_date": "2026-10-31",
+            "total_revenue": 1250.0,
+            "completed_work_orders_count": 4,
+            "total_appointments_count": 7,
+            "low_stock_alerts_count": 2,
+            "dtc_alerts_count": 1,
+        }
+    ]
+
+    response = client.get(
+        f"/api/v1/analytics/branches/{branch_id}/financial?startDate=2026-10-01&endDate=2026-10-31",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["branchId"] == str(branch_id)
+    assert data[0]["totalRevenue"] == 1250.0
+    assert data[0]["snapshotDate"] == "2026-10-31"
+
+
+def test_get_branch_financial_endpoint_invalid_range_422(test_client):
+    client, _, _ = test_client
+    tenant_id = uuid4()
+    branch_id = uuid4()
+
+    response = client.get(
+        f"/api/v1/analytics/branches/{branch_id}/financial?startDate=2026-10-31&endDate=2026-10-01",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "startDate" in response.json()["detail"]
+
+
+def test_get_network_summary_endpoint(test_client):
+    client, mock_repo, _ = test_client
+    tenant_id = uuid4()
+    mock_repo.get_network_summary.return_value = {
+        "total_active_branches_count": 3,
+        "total_network_revenue": 4850.0,
+        "total_network_completed_work_orders": 14,
+        "total_network_appointments": 22,
+        "total_network_dtc_alerts": 3,
+    }
+
+    response = client.get(
+        "/api/v1/analytics/network/summary",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["totalActiveBranchesCount"] == 3
+    assert data["totalNetworkRevenue"] == 4850.0
+    assert data["totalNetworkCompletedWorkOrders"] == 14
+    assert data["totalNetworkAppointments"] == 22
+    assert data["totalNetworkDtcAlerts"] == 3
+
