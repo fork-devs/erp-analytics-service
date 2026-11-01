@@ -1,0 +1,69 @@
+# =============================================================================
+# MANIFIESTO AZURE CONTAINER APPS (ACA) — ERP ANALYTICS SERVICE
+# =============================================================================
+
+apiVersion: 2024-03-01
+location: eastus2
+name: erp-analytics-service
+type: Microsoft.App/containerApps
+properties:
+  managedEnvironmentId: /subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/${ACA_ENVIRONMENT_NAME}
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: false
+      targetPort: 8090
+      transport: auto
+      allowInsecure: false
+    secrets:
+      - name: clickhouse-password
+        value: ${CLICKHOUSE_PASSWORD}
+      - name: jwt-secret-key
+        value: ${JWT_SECRET_KEY}
+  template:
+    containers:
+      - name: erp-analytics-service
+        image: ${ACR_NAME}.azurecr.io/erp-analytics-service:latest
+        resources:
+          cpu: 0.5
+          memory: 0.5Gi
+        env:
+          - name: SERVER_PORT
+            value: "8090"
+          - name: ENVIRONMENT
+            value: "prod"
+          - name: CLICKHOUSE_HOST
+            value: "${CLICKHOUSE_HOST}"
+          - name: CLICKHOUSE_PORT
+            value: "${CLICKHOUSE_PORT}"
+          - name: CLICKHOUSE_DATABASE
+            value: "${CLICKHOUSE_DATABASE}"
+          - name: CLICKHOUSE_USER
+            value: "${CLICKHOUSE_USER}"
+          - name: CLICKHOUSE_PASSWORD
+            secretRef: clickhouse-password
+          - name: CLICKHOUSE_SECURE
+            value: "true"
+          - name: JWT_SECRET_KEY
+            secretRef: jwt-secret-key
+        probes:
+          - type: Liveness
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          - type: Readiness
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+    scale:
+      minReplicas: 1
+      maxReplicas: 3
+      rules:
+        - name: http-scaling-rule
+          http:
+            metadata:
+              concurrentRequests: "100"
