@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     KAFKA_TOPIC_APPOINTMENTS: str = "fleet.appointments"
     KAFKA_CONSUMER_ENABLED: bool = True
 
+    # Security / JWT verification
+    JWKS_URL: str = "http://erp-auth-service:8081/.well-known/jwks.json"
+    JWT_ISSUER: str | None = None
+
     # Business timezone
     ANALYTICS_ZONE_ID: str = "America/Lima"
 
