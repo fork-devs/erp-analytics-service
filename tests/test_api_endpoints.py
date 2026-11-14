@@ -1,11 +1,43 @@
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from starlette.testclient import TestClient
 
-from app.core.config import Settings
 from app.main import app
 from app.repositories.analytics_repository import AnalyticsRepository
+
+
+_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_PUBLIC_KEY = _PRIVATE_KEY.public_key()
+
+
+def _make_token(
+    tenant_id: str | UUID,
+    token_type: str = "access",
+    expired: bool = False,
+) -> str:
+    now = datetime.now(timezone.utc)
+    exp = now - timedelta(minutes=5) if expired else now + timedelta(minutes=15)
+    payload = {
+        "sub": str(uuid4()),
+        "tenant_id": str(tenant_id),
+        "type": token_type,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+    }
+    return jwt.encode(payload, _PRIVATE_KEY, algorithm="RS256", headers={"kid": "test-key"})
+
+
+def _auth_headers(tenant_id: UUID, include_header: bool = False) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {_make_token(tenant_id)}"}
+    if include_header:
+        headers["X-Tenant-ID"] = str(tenant_id)
+    return headers
 
 
 @pytest.fixture
@@ -20,8 +52,12 @@ def test_client():
     app.state.clickhouse_manager = mock_ch_manager
     app.state.kafka_worker = mock_kafka_worker
 
-    with TestClient(app) as client:
-        yield client, mock_repo, mock_ch_manager
+    mock_jwk_client = MagicMock()
+    mock_jwk_client.get_signing_key_from_jwt.return_value = SimpleNamespace(key=_PUBLIC_KEY)
+
+    with patch("app.core.security.get_jwk_client", return_value=mock_jwk_client):
+        with TestClient(app) as client:
+            yield client, mock_repo, mock_ch_manager
 
 
 def test_healthz_endpoint(test_client):
@@ -66,7 +102,7 @@ def test_get_summary_endpoint(test_client):
 
     response = client.get(
         "/api/v1/analytics/summary",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -92,7 +128,7 @@ def test_get_revenue_trend_endpoint(test_client):
 
     response = client.get(
         "/api/v1/analytics/revenue/trend?interval=monthly&start_date=2026-10-01&end_date=2026-10-31",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -121,7 +157,7 @@ def test_get_work_orders_performance_endpoint(test_client):
 
     response = client.get(
         "/api/v1/analytics/work-orders/performance",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -145,7 +181,7 @@ def test_get_fleet_health_endpoint(test_client):
 
     response = client.get(
         "/api/v1/analytics/fleet/health-overview",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -156,12 +192,51 @@ def test_get_fleet_health_endpoint(test_client):
 
 def test_invalid_tenant_id_header(test_client):
     client, _, _ = test_client
-    response = client.get(
-        "/api/v1/analytics/summary",
-        headers={"X-Tenant-ID": "not-a-valid-uuid"},
-    )
+    tenant_id = uuid4()
+    headers = _auth_headers(tenant_id)
+    headers["X-Tenant-ID"] = "not-a-valid-uuid"
+    response = client.get("/api/v1/analytics/summary", headers=headers)
     assert response.status_code == 400
     assert "Invalid X-Tenant-ID header" in response.json()["detail"]
+
+
+def test_missing_bearer_token_rejected_even_with_x_tenant_id(test_client):
+    client, _, _ = test_client
+    response = client.get(
+        "/api/v1/analytics/summary",
+        headers={"X-Tenant-ID": str(uuid4())},
+    )
+    assert response.status_code == 401
+
+
+def test_mismatched_x_tenant_id_header_rejected_with_403(test_client):
+    client, _, _ = test_client
+    token_tenant = uuid4()
+    other_tenant = uuid4()
+    headers = _auth_headers(token_tenant)
+    headers["X-Tenant-ID"] = str(other_tenant)
+    response = client.get("/api/v1/analytics/summary", headers=headers)
+    assert response.status_code == 403
+
+
+def test_nil_tenant_uuid_in_jwt_rejected_with_401(test_client):
+    client, _, _ = test_client
+    nil_token = _make_token("00000000-0000-0000-0000-000000000000")
+    response = client.get(
+        "/api/v1/analytics/summary",
+        headers={"Authorization": f"Bearer {nil_token}"},
+    )
+    assert response.status_code == 401
+
+
+def test_refresh_token_rejected_with_401(test_client):
+    client, _, _ = test_client
+    refresh_token = _make_token(uuid4(), token_type="refresh")
+    response = client.get(
+        "/api/v1/analytics/summary",
+        headers={"Authorization": f"Bearer {refresh_token}"},
+    )
+    assert response.status_code == 401
 
 
 def test_get_branch_daily_summary_endpoint(test_client):
@@ -179,7 +254,7 @@ def test_get_branch_daily_summary_endpoint(test_client):
 
     response = client.get(
         f"/api/v1/analytics/branches/{branch_id}/summary",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -210,7 +285,7 @@ def test_get_branch_financial_endpoint_success(test_client):
 
     response = client.get(
         f"/api/v1/analytics/branches/{branch_id}/financial?startDate=2026-10-01&endDate=2026-10-31",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -227,7 +302,7 @@ def test_get_branch_financial_endpoint_invalid_range_422(test_client):
 
     response = client.get(
         f"/api/v1/analytics/branches/{branch_id}/financial?startDate=2026-10-31&endDate=2026-10-01",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -247,7 +322,7 @@ def test_get_network_summary_endpoint(test_client):
 
     response = client.get(
         "/api/v1/analytics/network/summary",
-        headers={"X-Tenant-ID": str(tenant_id)},
+        headers=_auth_headers(tenant_id),
     )
     assert response.status_code == 200
     data = response.json()
@@ -256,4 +331,3 @@ def test_get_network_summary_endpoint(test_client):
     assert data["totalNetworkCompletedWorkOrders"] == 14
     assert data["totalNetworkAppointments"] == 22
     assert data["totalNetworkDtcAlerts"] == 3
-
