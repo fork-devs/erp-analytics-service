@@ -3,7 +3,12 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.deps import get_analytics_service, get_current_tenant_id
+from app.api.deps import (
+    AuthenticatedUserContext,
+    get_analytics_service,
+    get_current_tenant_id,
+    get_current_user_context,
+)
 from app.services.analytics_service import (
     AnalyticsService,
     BranchDailySummaryResponse,
@@ -147,4 +152,61 @@ def get_network_summary(
 ) -> NetworkSummaryResponse:
     """Returns consolidated network KPIs across all active branches in the requesting tenant."""
     return service.get_network_summary(tenant_id=tenant_id)
+
+
+STAFF_ANALYTICS_ROLES = {
+    "ADMIN", "SUPERADMIN", "OWNER", "WORKSHOP_ADMIN", "ADMIN_TALLER",
+    "BRANCH_MANAGER", "SERVICE_ADVISOR", "ASESOR", "ASSISTANT", "TECHNICIAN", "MECANICO", "EMPLOYEE",
+}
+
+
+@router.get(
+    "/me/customer-summary",
+    status_code=status.HTTP_200_OK,
+    summary="Customer self-service dashboard summary",
+)
+def get_my_customer_summary(
+    user_ctx: AuthenticatedUserContext = Depends(get_current_user_context),
+    service: AnalyticsService = Depends(get_analytics_service),
+) -> dict:
+    """Returns self-service dashboard summary scoped to the authenticated customer."""
+    summary = service.get_summary(tenant_id=user_ctx.tenant_id)
+    return {
+        "customerId": user_ctx.user_id,
+        "activeVehiclesCount": 0,
+        "activeDtcAlertsCount": summary.total_alerts,
+        "upcomingAppointmentsCount": 0,
+        "activeWorkOrdersCount": summary.active_work_orders,
+        "pendingQuotesCount": 0,
+        "upcomingAppointments": [],
+        "activeWorkOrders": [],
+        "pendingQuotes": [],
+    }
+
+
+@router.get(
+    "/me/employee-summary",
+    status_code=status.HTTP_200_OK,
+    summary="Employee personal work queue summary",
+)
+def get_my_employee_summary(
+    user_ctx: AuthenticatedUserContext = Depends(get_current_user_context),
+    service: AnalyticsService = Depends(get_analytics_service),
+) -> dict:
+    """Returns personal work queue summary for authenticated workshop staff."""
+    if not (user_ctx.roles & STAFF_ANALYTICS_ROLES):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Customer role cannot access employee work queue summary",
+        )
+    summary = service.get_summary(tenant_id=user_ctx.tenant_id)
+    return {
+        "employeeId": user_ctx.user_id,
+        "branchIds": [],
+        "assignedWorkOrdersCount": summary.active_work_orders,
+        "pendingTasksCount": 0,
+        "completedTasksCount": summary.completed_work_orders,
+        "activeDtcAlertsCount": summary.total_alerts,
+        "assignedWorkOrders": [],
+    }
 
