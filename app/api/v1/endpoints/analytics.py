@@ -140,12 +140,6 @@ def get_branch_financial(
     status_code=status.HTTP_200_OK,
     summary="Get consolidated network multi-branch summary",
 )
-@router.get(
-    "/multi-branch/overview",
-    response_model=NetworkSummaryResponse,
-    status_code=status.HTTP_200_OK,
-    include_in_schema=False,
-)
 def get_network_summary(
     tenant_id: UUID = Depends(get_current_tenant_id),
     service: AnalyticsService = Depends(get_analytics_service),
