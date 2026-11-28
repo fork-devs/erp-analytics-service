@@ -1,7 +1,7 @@
 from datetime import date
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from app.api.deps import (
     AuthenticatedUserContext,
@@ -9,6 +9,7 @@ from app.api.deps import (
     get_current_tenant_id,
     get_current_user_context,
 )
+from app.services.acl_client import AnalyticsAclClient
 from app.services.analytics_service import (
     AnalyticsService,
     BranchDailySummaryResponse,
@@ -129,7 +130,7 @@ def get_branch_financial(
         )
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
 
@@ -160,21 +161,23 @@ STAFF_ANALYTICS_ROLES = {
     summary="Customer self-service dashboard summary",
 )
 def get_my_customer_summary(
+    authorization: Optional[str] = Header(default=None),
     user_ctx: AuthenticatedUserContext = Depends(get_current_user_context),
     service: AnalyticsService = Depends(get_analytics_service),
 ) -> dict:
     """Returns self-service dashboard summary scoped to the authenticated customer."""
     summary = service.get_summary(tenant_id=user_ctx.tenant_id)
+    acl = AnalyticsAclClient().fetch_customer_dashboard(authorization, UUID(user_ctx.user_id))
     return {
         "customerId": user_ctx.user_id,
-        "activeVehiclesCount": 0,
+        "activeVehiclesCount": acl["vehiclesCount"],
         "activeDtcAlertsCount": summary.total_alerts,
-        "upcomingAppointmentsCount": 0,
-        "activeWorkOrdersCount": summary.active_work_orders,
-        "pendingQuotesCount": 0,
-        "upcomingAppointments": [],
-        "activeWorkOrders": [],
-        "pendingQuotes": [],
+        "upcomingAppointmentsCount": len(acl["appointments"]),
+        "activeWorkOrdersCount": len(acl["workOrders"]) if acl["workOrders"] else summary.active_work_orders,
+        "pendingQuotesCount": len(acl["pendingQuotes"]),
+        "upcomingAppointments": acl["appointments"],
+        "activeWorkOrders": acl["workOrders"],
+        "pendingQuotes": acl["pendingQuotes"],
     }
 
 
@@ -184,6 +187,7 @@ def get_my_customer_summary(
     summary="Employee personal work queue summary",
 )
 def get_my_employee_summary(
+    authorization: Optional[str] = Header(default=None),
     user_ctx: AuthenticatedUserContext = Depends(get_current_user_context),
     service: AnalyticsService = Depends(get_analytics_service),
 ) -> dict:
@@ -194,13 +198,14 @@ def get_my_employee_summary(
             detail="Customer role cannot access employee work queue summary",
         )
     summary = service.get_summary(tenant_id=user_ctx.tenant_id)
+    acl = AnalyticsAclClient().fetch_employee_dashboard(authorization, user_ctx.tenant_id, UUID(user_ctx.user_id))
     return {
         "employeeId": user_ctx.user_id,
-        "branchIds": [],
-        "assignedWorkOrdersCount": summary.active_work_orders,
+        "branchIds": acl["branchIds"],
+        "assignedWorkOrdersCount": len(acl["assignedWorkOrders"]) if acl["assignedWorkOrders"] else summary.active_work_orders,
         "pendingTasksCount": 0,
         "completedTasksCount": summary.completed_work_orders,
         "activeDtcAlertsCount": summary.total_alerts,
-        "assignedWorkOrders": [],
+        "assignedWorkOrders": acl["assignedWorkOrders"],
     }
 
