@@ -55,7 +55,7 @@ class AnalyticsEventConsumer:
 
             if "invoices" in topic:
                 self._handle_invoice(event_id, tenant_id, payload, occurred_at)
-            elif "payments" in topic:
+            elif "payments" in topic or event_type == "VoucherPaid":
                 self._handle_payment(event_id, tenant_id, payload, occurred_at)
             elif "work-orders" in topic:
                 self._handle_work_order(event_id, tenant_id, payload, occurred_at, event_type)
@@ -111,6 +111,17 @@ class AnalyticsEventConsumer:
             "event_date": parse_datetime(p.get("paid_at") or dt).date(),
         }
         self._repo.insert_payments([record])
+        branch_id_val = p.get("branch_id") or p.get("branchId")
+        if branch_id_val and record["status"].upper() in {"COMPLETED", "CONFIRMED", "PAID"}:
+            try:
+                self._repo.apply_delta_to_snapshot(
+                    tenant_id=tenant_id,
+                    branch_id=UUID(str(branch_id_val)),
+                    snapshot_date=get_business_date(record["paid_at"]),
+                    revenue_delta=record["amount"],
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update branch revenue snapshot from payment event: {e}")
 
     def _handle_work_order(
         self,
