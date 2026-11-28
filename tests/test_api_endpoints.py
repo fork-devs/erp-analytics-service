@@ -295,7 +295,7 @@ def test_get_branch_financial_endpoint_success(test_client):
     assert data[0]["snapshotDate"] == "2026-10-31"
 
 
-def test_get_branch_financial_endpoint_invalid_range_422(test_client):
+def test_get_branch_financial_endpoint_invalid_range_400(test_client):
     client, _, _ = test_client
     tenant_id = uuid4()
     branch_id = uuid4()
@@ -304,7 +304,7 @@ def test_get_branch_financial_endpoint_invalid_range_422(test_client):
         f"/api/v1/analytics/branches/{branch_id}/financial?startDate=2026-10-31&endDate=2026-10-01",
         headers=_auth_headers(tenant_id),
     )
-    assert response.status_code == 422
+    assert response.status_code == 400
     assert response.headers["content-type"] == "application/problem+json"
     assert "startDate" in response.json()["detail"]
 
